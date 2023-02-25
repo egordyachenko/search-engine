@@ -1,11 +1,10 @@
-use serde::{Deserialize, Serialize};
-use serde_json::Result;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io;
 use std::path::{Path, PathBuf};
-use xml::reader::EventReader;
-use xml::reader::XmlEvent::Characters;
+use std::process::exit;
+use std::{env, io};
+use xml::common::{Position, TextPosition};
+use xml::reader::{EventReader, XmlEvent};
 
 #[derive(Debug)]
 struct Lexer<'a> {
@@ -68,30 +67,44 @@ impl<'a> Iterator for Lexer<'a> {
     }
 }
 
-fn index_document(content: &str) -> HashMap<String, usize> {
-    unimplemented!();
-}
+fn parse_xml_file(file_path: &Path) -> Option<String> {
+    let file = File::open(&file_path)
+        .map_err(|err| {
+            eprintln!(
+                "ERROR: could not open file {file_path}: {err}",
+                file_path = file_path.display()
+            );
+        })
+        .ok()?;
 
-fn read_xml_file<P: AsRef<Path>>(file_path: P) -> io::Result<String> {
-    let file = File::open(file_path)?;
     let er = EventReader::new(file);
     let mut content = String::new();
 
     for event in er.into_iter() {
-        if let Characters(text) = event.expect("TODO: error handling") {
+        let event = event
+            .map_err(|err| {
+                let TextPosition { row, column } = err.position();
+                let msg = err.msg();
+                eprintln!(
+                    "{file_path}:{row}:{column}: ERROR: {msg}",
+                    file_path = file_path.display()
+                );
+            })
+            .ok()?;
+
+        if let XmlEvent::Characters(text) = event {
             content.push_str(&text);
             content.push_str(" ");
         }
     }
 
-    Ok(content)
+    Some(content)
 }
 
 type TermFreq = HashMap<String, usize>;
 type TermFreqIndex = HashMap<PathBuf, TermFreq>;
 
-fn main() -> io::Result<()> {
-    let index_path = "index.json";
+fn check_index(index_path: &str) -> io::Result<()> {
     let index_file = File::open(index_path)?;
     println!("Reading {index_path} index file...");
     let tf_index: TermFreqIndex = serde_json::from_reader(index_file).expect("serde main1");
@@ -104,14 +117,19 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn main2() -> io::Result<()> {
-    let dir_path = "../docs.gl/gl4";
+fn index_folder(dir_path: &str) -> io::Result<()> {
     let read_dir = fs::read_dir(dir_path)?;
     let mut tf_index = TermFreqIndex::new();
 
-    for file in read_dir {
+    'next_file: for file in read_dir {
         let file_path = file?.path();
-        let content = read_xml_file(&file_path)?.chars().collect::<Vec<_>>();
+
+        println!("Indexing {:?}...", &file_path);
+
+        let content = match parse_xml_file(&file_path) {
+            Some(content) => content.chars().collect::<Vec<_>>(),
+            None => continue 'next_file,
+        };
 
         let mut tf = TermFreq::new();
 
@@ -128,10 +146,6 @@ fn main2() -> io::Result<()> {
             }
         }
 
-        let mut stats = tf.iter().collect::<Vec<_>>();
-
-        stats.sort_by(|(_, f), (_, f2)| f2.cmp(f));
-
         tf_index.insert(file_path, tf);
     }
 
@@ -141,4 +155,43 @@ fn main2() -> io::Result<()> {
     serde_json::to_writer(index_file, &tf_index).expect("serde return error");
 
     Ok(())
+}
+
+fn main() {
+    let mut args = env::args();
+    let _program = args.next().expect("path to program is provided");
+
+    let subcommand = args.next().unwrap_or_else(|| {
+        eprintln!("ERROR: no subcommand is provided");
+        exit(1)
+    });
+
+    match subcommand.as_str() {
+        "index" => {
+            let dir_path = args.next().unwrap_or_else(|| {
+                eprintln!("ERROR: no directory is provided for {subcommand} subcommand");
+                exit(1);
+            });
+
+            index_folder(&dir_path).unwrap_or_else(|err| {
+                eprintln!("ERROR: could not index folder {dir_path}: {err}");
+                exit(1);
+            })
+        }
+        "search" => {
+            let index_path = args.next().unwrap_or_else(|| {
+                eprintln!("ERROR: no path to index is provided for {subcommand} subcommand");
+                exit(1);
+            });
+
+            check_index(&index_path).unwrap_or_else(|err| {
+                eprintln!("ERROR: could not check index file {index_path}: {err}");
+                exit(1);
+            });
+        }
+        _ => {
+            eprint!("ERROR: unknown subcommand {subcommand}");
+            exit(1);
+        }
+    }
 }
