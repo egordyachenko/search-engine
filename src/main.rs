@@ -3,6 +3,7 @@ use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use tiny_http::{Header, Method, Request, Response, Server};
 use xml::common::{Position, TextPosition};
 use xml::reader::{EventReader, XmlEvent};
 
@@ -193,6 +194,48 @@ fn usage(program: &str) {
     eprintln!("Subcommands:");
     eprintln!("     index <folder>      index the <folder> and save the index to index.json file");
     eprintln!("     search <index-file>  check how many documents are indexed in the file (searching is not implemented yet)");
+    eprintln!("     serve [address]     start local HTTP server with web interface");
+}
+
+fn serve_404(request: Request) -> Result<(), ()> {
+    request
+        .respond(Response::from_string("404").with_status_code(404))
+        .map_err(|err| {
+            eprintln!("ERROR: could not serve a request: {err}");
+        })
+}
+
+fn serve_static_file(request: Request, file_path: &str, content_type: &str) -> Result<(), ()> {
+    let content_type_header =
+        Header::from_bytes("Content-Type", content_type).expect("no garbage in headers");
+
+    let file = File::open(file_path).map_err(|err| {
+        eprintln!("ERROR: could not serve file {file_path}: {err}");
+    })?;
+
+    let response = Response::from_file(file).with_header(content_type_header);
+
+    request.respond(response).map_err(|err| {
+        eprintln!("ERROR: could not serve static file {file_path}: {err}");
+    })
+}
+
+fn serve_request(request: Request) -> Result<(), ()> {
+    println!(
+        "INFO: received request! method: {:?}, url: {:?}",
+        request.method(),
+        request.url()
+    );
+
+    match (request.method(), request.url()) {
+        (Method::Get, "/index.js") => {
+            serve_static_file(request, "index.js", "text/javascript; charset=utf-8")
+        }
+        (Method::Get, "/") | (Method::Get, "/index.html") => {
+            serve_static_file(request, "index.html", "text/html; charset=utf-8")
+        }
+        _ => serve_404(request),
+    }
 }
 
 fn entry() -> Result<(), ()> {
@@ -222,6 +265,20 @@ fn entry() -> Result<(), ()> {
             })?;
 
             check_index(&index_path)?;
+        }
+        "serve" => {
+            let address = args.next().unwrap_or(String::from("127.0.0.1:6969"));
+
+            let server = Server::http(&address).map_err(|err| {
+                eprintln!("ERROR: could not start HTTP server at {address}: {err}");
+            })?;
+
+            println!("INFO: listening at http://{address}/");
+
+            for request in server.incoming_requests() {
+                serve_request(request)?;
+            }
+            unimplemented!();
         }
         _ => {
             usage(&program);
